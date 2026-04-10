@@ -1,0 +1,8 @@
+{
+  "name": "F.R.I.D.A.Y. Assistant",
+  "description": "A sophisticated AI assistant inspired by Iron Man's F.R.I.D.A.Y., featuring high-performance chat, real-time voice interaction, and multi-modal capabilities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
