@@ -120,6 +120,24 @@ const SecurityDashboard: React.FC<SecurityDashboardProps> = ({ isOpen, onClose, 
                   <p className="text-[10px] font-mono mt-2 opacity-40 italic">Uplink: 1.2 GB/s</p>
                 </div>
 
+                <div className="bg-slate-900/50 p-4 border rounded-lg" style={{ borderColor: `${activeCoreColor}11` }}>
+                  <span className="text-[10px] orbitron opacity-50 block mb-4">VIRUS PROTECTION</span>
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 rounded-full bg-cyan-500 shadow-[0_0_10px_#06b6d4]"></div>
+                    <span className="orbitron text-xl font-bold text-cyan-500">ACTIVE</span>
+                  </div>
+                  <p className="text-[10px] font-mono mt-2 opacity-40 italic">Real-time heuristics enabled</p>
+                </div>
+
+                <div className="bg-slate-900/50 p-4 border rounded-lg" style={{ borderColor: `${activeCoreColor}11` }}>
+                  <span className="text-[10px] orbitron opacity-50 block mb-4">DEVICE ACCESS</span>
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]"></div>
+                    <span className="orbitron text-xl font-bold text-green-500">GRANTED</span>
+                  </div>
+                  <p className="text-[10px] font-mono mt-2 opacity-40 italic">Stark-OS Kernel Integration</p>
+                </div>
+
                 {/* Hardware Diagnostic Section */}
                 <div className="bg-slate-900/50 p-4 border rounded-lg space-y-4" style={{ borderColor: `${activeCoreColor}22` }}>
                   <span className="text-[10px] orbitron text-cyan-400 block border-b border-cyan-500/20 pb-2">HARDWARE DIAGNOSTIC</span>
@@ -152,6 +170,22 @@ const SecurityDashboard: React.FC<SecurityDashboardProps> = ({ isOpen, onClose, 
                     <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
                       <motion.div className="h-full bg-green-500" animate={{ width: `${(networkTraffic/100)*100}%` }} />
                     </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/50 p-4 border rounded-lg space-y-3" style={{ borderColor: `${activeCoreColor}11` }}>
+                  <span className="text-[10px] orbitron opacity-50 block mb-2">VULNERABILITY SCAN</span>
+                  <div className="flex justify-between items-center text-[10px] font-mono">
+                    <span className="opacity-60">PORT SCANS</span>
+                    <span className="text-green-400">CLEAN</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[10px] font-mono">
+                    <span className="opacity-60">SQL INJECTION</span>
+                    <span className="text-green-400">BLOCKED</span>
+                  </div>
+                  <div className="flex justify-between items-center text-[10px] font-mono">
+                    <span className="opacity-60">DDoS PROTECTION</span>
+                    <span className="text-cyan-400">STANDBY</span>
                   </div>
                 </div>
               </div>

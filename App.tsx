@@ -1,57 +1,138 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Message, MessageRole, VoiceState, NeuralCore } from './types';
+import { Message, MessageRole, VoiceState, NeuralCore, ChatSession } from './types';
 import { FRIDAY_SYSTEM_INSTRUCTION, CORE_CONFIGS, MODELS } from './constants';
 import { decode, decodeAudioData } from './audioUtils';
 import ChatWindow from './components/ChatWindow';
 import Sidebar from './components/Sidebar';
 import HUDOverlay from './components/HUDOverlay';
-import VoiceInterface from './components/VoiceInterface';
+import VoiceInterface, { VoiceInterfaceRef } from './components/VoiceInterface';
 import SecurityDashboard from './components/SecurityDashboard';
+import SessionExplorer from './components/SessionExplorer';
+import ToastContainer from './components/ToastContainer';
+import { Notification, NotificationType } from './types';
 
-const CORE_VOICES: Record<NeuralCore, string> = {
-  FRIDAY: 'Kore',
-  DEEPSEEK: 'Kore',
-  GPT4: 'Kore',
-  GEMINI: 'Kore',
-  BOLT: 'Kore',
+export const CORE_VOICES: Record<NeuralCore, string> = {
+  FRIDAY: 'Aoede',
+  DEEPSEEK: 'Aoede',
+  GPT4: 'Aoede',
+  GEMINI: 'Aoede',
+  BOLT: 'Aoede',
   ULTRON: 'Fenrir',
-  JARVIS: 'Kore',
-  VISION: 'Zephyr'
+  JARVIS: 'Charon',
+  VISION: 'Charon',
+  CODEX: 'Aoede'
 };
 
 const App: React.FC = () => {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    try {
+      const saved = localStorage.getItem('friday_sessions');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Failed to load sessions:", e);
+      return [];
+    }
+  });
+
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  
+  const activeSession = sessions.find(s => s.id === activeSessionId) || null;
+  const messages = activeSession?.messages || [];
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [activeCore, setActiveCore] = useState<NeuralCore>('FRIDAY');
-  const [speechRate, setSpeechRate] = useState(1.3);
+  const [speechRate, setSpeechRate] = useState(1.0);
   const [pendingImagePrompt, setPendingImagePrompt] = useState<string | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>({
     isActive: false,
     isListening: false,
     isSpeaking: false
   });
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const addNotification = useCallback((title: string, message: string, type: NotificationType = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setNotifications(prev => [...prev.slice(-3), { id, title, message, type, timestamp: Date.now() }]);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  }, []);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentTTSNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const lastSpokenIndexRef = useRef(0);
+  const voiceRef = useRef<VoiceInterfaceRef>(null);
 
   useEffect(() => {
-    const welcome: Message = {
-      id: '1',
-      role: MessageRole.FRIDAY,
-      text: "Systems are green, Boss. All Neural Cores are standing by and ready for deployment. Which processing unit should I initialize for you today?",
-      timestamp: Date.now(),
-      core: 'FRIDAY'
+    // Initial setup
+    const timer = setTimeout(() => {
+      addNotification('System Integrity', 'All Stark-Net defensive protocols are active. Neural link stable.', 'security');
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [addNotification]);
+
+  useEffect(() => {
+    localStorage.setItem('friday_sessions', JSON.stringify(sessions));
+  }, [sessions]);
+
+  const handleNewSession = (core: NeuralCore = activeCore) => {
+    const newId = Date.now().toString();
+    const newSession: ChatSession = {
+      id: newId,
+      title: 'New Neural Link',
+      messages: [],
+      lastTimestamp: Date.now(),
+      core
     };
-    setMessages([welcome]);
-  }, []);
+    setSessions(prev => [newSession, ...prev]);
+    setActiveSessionId(newId);
+    setActiveCore(core);
+    setIsSidebarOpen(false);
+  };
 
-  const speakText = async (text: string) => {
-    if (voiceState.isActive) return;
+  const handleSelectSession = (id: string) => {
+    const session = sessions.find(s => s.id === id);
+    if (session) {
+      setActiveSessionId(id);
+      setActiveCore(session.core);
+    }
+  };
 
+  const updateSessionTitle = (sessionId: string, firstMessage: string) => {
+    setSessions(prev => prev.map(s => {
+      if (s.id === sessionId && s.title === 'New Neural Link') {
+        const title = firstMessage.length > 30 ? firstMessage.substring(0, 30) + '...' : firstMessage;
+        return { ...s, title };
+      }
+      return s;
+    }));
+  };
+
+  const handleClearChat = () => {
+    if (activeSessionId) {
+      setSessions(prev => prev.filter(s => s.id !== activeSessionId));
+      setActiveSessionId(null);
+    } else {
+      setSessions([]);
+    }
+    localStorage.removeItem('friday_sessions');
+  };
+
+  const vocalQueueRef = useRef<string[]>([]);
+  const isProcessingQueueRef = useRef(false);
+
+  const processVocalQueue = async () => {
+    if (isProcessingQueueRef.current || vocalQueueRef.current.length === 0) return;
+    
+    isProcessingQueueRef.current = true;
+    const text = vocalQueueRef.current[0];
+    
     try {
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -59,14 +140,10 @@ const App: React.FC = () => {
       const ctx = audioContextRef.current;
       if (ctx.state === 'suspended') await ctx.resume();
 
-      if (currentTTSNodeRef.current) {
-        try { currentTTSNodeRef.current.stop(); } catch (e) {}
-      }
-
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
         model: MODELS.TTS,
-        contents: [{ parts: [{ text: `Speak professionally as an AI assistant: ${text}` }] }],
+        contents: [{ parts: [{ text: `Say with F.R.I.D.A.Y.'s signature sophisticated, witty persona. If the text is in English, use a charming Irish lilt. Otherwise, adapt the tone and accent to the language of the text while maintaining the persona's intelligence and sophistication: ${text}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -86,29 +163,107 @@ const App: React.FC = () => {
         source.connect(ctx.destination);
         
         currentTTSNodeRef.current = source;
-        source.start();
-        
         setVoiceState(prev => ({ ...prev, isSpeaking: true }));
+        
         source.onended = () => {
+          vocalQueueRef.current.shift();
+          isProcessingQueueRef.current = false;
           setVoiceState(prev => ({ ...prev, isSpeaking: false }));
+          processVocalQueue();
         };
+        
+        source.start();
+      } else {
+        throw new Error("No audio data");
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("TTS Error:", error);
+      
+      const isQuotaExceeded = error?.message?.includes('429') || error?.status === 429 || JSON.stringify(error).includes('429');
+      if (isQuotaExceeded) {
+        addNotification('System Alert', 'Neural voice quota reached. Deploying local synthesis fallback.', 'warning');
+      }
+
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = speechRate;
+        const voices = window.speechSynthesis.getVoices();
+        const preferredVoice = voices.find(v => v.lang.startsWith('en-IE') || v.name.includes('Irish') || v.name.includes('Samantha'));
+        if (preferredVoice) utterance.voice = preferredVoice;
+
+        utterance.onstart = () => setVoiceState(prev => ({ ...prev, isSpeaking: true }));
+        utterance.onend = () => {
+          vocalQueueRef.current.shift();
+          isProcessingQueueRef.current = false;
+          setVoiceState(prev => ({ ...prev, isSpeaking: false }));
+          processVocalQueue();
+        };
+        
+        window.speechSynthesis.speak(utterance);
+      } else {
+        vocalQueueRef.current.shift();
+        isProcessingQueueRef.current = false;
+        processVocalQueue();
+      }
     }
   };
 
-  const handleSendMessage = async (text: string, isFromVoice: boolean = false) => {
-    if (!text.trim()) return;
+  const speakText = async (text: string, interrupt: boolean = true) => {
+    if (voiceState.isActive || !text.trim()) return;
+
+    if (interrupt) {
+      vocalQueueRef.current = [text];
+      if (currentTTSNodeRef.current) {
+        try { currentTTSNodeRef.current.stop(); } catch (e) {}
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      isProcessingQueueRef.current = false;
+    } else {
+      vocalQueueRef.current.push(text);
+    }
+
+    processVocalQueue();
+  };
+
+  const handleSendMessage = async (text: string, image?: { data: string, mimeType: string }, isFromVoice: boolean = false) => {
+    if (!text.trim() && !image) return;
+
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId) {
+      const newId = Date.now().toString();
+      const newSession: ChatSession = {
+        id: newId,
+        title: text ? (text.length > 30 ? text.substring(0, 30) + '...' : text) : 'Optical Analysis',
+        messages: [],
+        lastTimestamp: Date.now(),
+        core: activeCore
+      };
+      setSessions(prev => [newSession, ...prev]);
+      setActiveSessionId(newId);
+      targetSessionId = newId;
+      addNotification('Uplink Established', 'New secure neural thread initialized.', 'success');
+    }
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: MessageRole.USER,
-      text,
-      timestamp: Date.now()
+      text: text || "Analyze this visual data.",
+      timestamp: Date.now(),
+      type: image ? 'image' : 'text',
+      mediaUrl: image ? `data:${image.mimeType};base64,${image.data}` : undefined
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    setSessions(prev => prev.map(s => 
+      s.id === targetSessionId ? { ...s, messages: [...s.messages, userMessage], lastTimestamp: Date.now() } : s
+    ));
+    
+    // Update title if it's the first message
+    const session = sessions.find(s => s.id === targetSessionId);
+    if (session && session.messages.length === 0 && text) {
+      updateSessionTitle(targetSessionId, text);
+    }
     
     if (!isFromVoice) {
       setIsLoading(true);
@@ -118,27 +273,72 @@ const App: React.FC = () => {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const coreConfig = CORE_CONFIGS[activeCore];
         
+        const currentMessages = sessions.find(s => s.id === targetSessionId)?.messages || [];
+        const history = currentMessages.slice(-10).map(m => {
+          const parts: any[] = [{ text: m.text }];
+          if (m.type === 'image' && m.mediaUrl) {
+             const [mime, data] = m.mediaUrl.split(',');
+             parts.unshift({
+               inlineData: {
+                 mimeType: mime.split(':')[1].split(';')[0],
+                 data: data
+               }
+             });
+          }
+          return {
+            role: m.role === MessageRole.USER ? 'user' : 'model',
+            parts
+          };
+        });
+
+        const currentParts: any[] = [{ text: text || "Analyze this image." }];
+        if (image) {
+          currentParts.unshift({
+            inlineData: {
+              mimeType: image.mimeType,
+              data: image.data
+            }
+          });
+          addNotification('Visual Uplink', 'Streaming optical data to neural core...', 'info');
+        }
+        
+        history.push({ role: 'user', parts: currentParts });
+
         const responseStream = await ai.models.generateContentStream({
           model: MODELS.CHAT,
-          contents: text,
+          contents: history,
           config: {
-            systemInstruction: `${FRIDAY_SYSTEM_INSTRUCTION}\n\nACTIVE CORE PROTOCOL: ${coreConfig.instruction}`,
+            systemInstruction: `${FRIDAY_SYSTEM_INSTRUCTION}\n\nACTIVE CORE PROTOCOL: ${coreConfig.instruction}\n\nOPTICAL ANALYSIS MODE: If an image is provided, perform detailed analysis. You have access to STARK LENS technology.`,
             temperature: 0.8,
             tools: [{ googleSearch: {} }]
           },
         });
 
-        setMessages(prev => [...prev, {
-          id: fridayMessageId,
-          role: MessageRole.FRIDAY,
-          text: "",
-          timestamp: Date.now(),
-          core: activeCore
-        }]);
+        setSessions(prev => prev.map(s => 
+          s.id === targetSessionId ? { ...s, messages: [...s.messages, {
+            id: fridayMessageId,
+            role: MessageRole.FRIDAY,
+            text: "",
+            timestamp: Date.now(),
+            core: activeCore
+          }] } : s
+        ));
 
         let fullText = "";
         let groundingUrls: string[] = [];
         let firstChunkReceived = false;
+        lastSpokenIndexRef.current = 0;
+        
+        // Interrupt any previous reading
+        if (currentTTSNodeRef.current) {
+          try { currentTTSNodeRef.current.stop(); } catch (e) {}
+        }
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+        }
+        vocalQueueRef.current = [];
+        isProcessingQueueRef.current = false;
+        setVoiceState(prev => ({ ...prev, isSpeaking: false }));
 
         for await (const chunk of responseStream) {
           if (!firstChunkReceived) {
@@ -148,6 +348,16 @@ const App: React.FC = () => {
           
           fullText += chunk.text || "";
           
+          // Incremental TTS: Find sentences and speak them immediately
+          const parts = fullText.split(/([.!?]\s+)/);
+          if (parts.length > lastSpokenIndexRef.current + 1) {
+            const nextPart = parts.slice(lastSpokenIndexRef.current, lastSpokenIndexRef.current + 2).join("");
+            if (nextPart.trim().length > 10) {
+              speakText(nextPart, false);
+              lastSpokenIndexRef.current += 2;
+            }
+          }
+          
           const groundingMetadata = chunk.candidates?.[0]?.groundingMetadata;
           if (groundingMetadata?.groundingChunks) {
             const urls = groundingMetadata.groundingChunks
@@ -156,38 +366,45 @@ const App: React.FC = () => {
             groundingUrls = [...new Set([...groundingUrls, ...urls])];
           }
 
-          setMessages(prev => prev.map(m => 
-            m.id === fridayMessageId ? { ...m, text: fullText } : m
+          setSessions(prev => prev.map(s => 
+            s.id === targetSessionId ? {
+              ...s,
+              messages: s.messages.map(m => m.id === fridayMessageId ? { ...m, text: fullText } : m)
+            } : s
           ));
+        }
+
+        // Final catch-up for any remaining text
+        const remainingText = fullText.split(/([.!?]\s+)/).slice(lastSpokenIndexRef.current).join("");
+        if (remainingText.trim()) {
+           speakText(remainingText, false);
         }
 
         if (groundingUrls.length > 0) {
           const sourcesText = "\n\n**Data Sources Analyzed:**\n" + Array.from(new Set(groundingUrls)).map(url => `- ${url}`).join('\n');
           const finalFullText = fullText + sourcesText;
-          setMessages(prev => prev.map(m => 
-            m.id === fridayMessageId ? { ...m, text: finalFullText } : m
+          setSessions(prev => prev.map(s => 
+            s.id === targetSessionId ? {
+              ...s,
+              messages: s.messages.map(m => m.id === fridayMessageId ? { ...m, text: finalFullText } : m)
+            } : s
           ));
-          speakText(fullText);
-        } else {
-          speakText(fullText);
         }
 
       } catch (error) {
         console.error("Streaming Error:", error);
-        setMessages(prev => {
-          const exists = prev.some(m => m.id === fridayMessageId);
-          if (exists) {
-            return prev.map(m => m.id === fridayMessageId ? { ...m, text: "I'm sorry Boss, my connection just dropped. I'll try to re-establish the link." } : m);
-          } else {
-            return [...prev, {
+        setSessions(prev => prev.map(s => 
+          s.id === targetSessionId ? {
+            ...s,
+            messages: [...s.messages.filter(m => m.id !== fridayMessageId), {
               id: fridayMessageId,
               role: MessageRole.FRIDAY,
               text: "Critical failure in the processing uplink. I'm working on a workaround, Boss.",
               timestamp: Date.now(),
               core: 'FRIDAY'
-            }];
-          }
-        });
+            }]
+          } : s
+        ));
       } finally {
         setIsLoading(false);
       }
@@ -195,24 +412,29 @@ const App: React.FC = () => {
   };
 
   const handleVoiceTranscriptionUpdate = useCallback((id: string, role: MessageRole, text: string) => {
-    setMessages(prev => {
-      const exists = prev.find(m => m.id === id);
-      if (exists) {
-        return prev.map(m => m.id === id ? { ...m, text } : m);
-      } else {
-        return [...prev, {
-          id,
-          role,
-          text,
-          timestamp: Date.now(),
-          core: role === MessageRole.FRIDAY ? activeCore : undefined
-        }];
+    if (!activeSessionId) return;
+
+    setSessions(prev => prev.map(s => {
+      if (s.id === activeSessionId) {
+        const exists = s.messages.find(m => m.id === id);
+        if (exists) {
+          return { ...s, messages: s.messages.map(m => m.id === id ? { ...m, text } : m), lastTimestamp: Date.now() };
+        } else {
+          return { ...s, messages: [...s.messages, {
+            id,
+            role,
+            text,
+            timestamp: Date.now(),
+            core: role === MessageRole.FRIDAY ? activeCore : undefined
+          }], lastTimestamp: Date.now() };
+        }
       }
-    });
-  }, [activeCore]);
+      return s;
+    }));
+  }, [activeSessionId, activeCore]);
 
   const handleGenerateImage = async () => {
-    if (!pendingImagePrompt) return;
+    if (!pendingImagePrompt || !activeSessionId) return;
     const prompt = pendingImagePrompt;
     setPendingImagePrompt(null);
     setIsLoading(true);
@@ -228,16 +450,23 @@ const App: React.FC = () => {
         if (part.inlineData) imageUrl = `data:image/png;base64,${part.inlineData.data}`;
       }
       if (imageUrl) {
+        addNotification('Render Complete', `Asset generated successfully for "${prompt}".`, 'success');
         const msgText = `Asset rendered successfully for: ${prompt}`;
-        setMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          role: MessageRole.FRIDAY,
-          text: msgText,
-          type: 'image',
-          mediaUrl: imageUrl,
-          timestamp: Date.now(),
-          core: activeCore
-        }]);
+        setSessions(prev => prev.map(s => 
+          s.id === activeSessionId ? {
+            ...s,
+            messages: [...s.messages, {
+              id: Date.now().toString(),
+              role: MessageRole.FRIDAY,
+              text: msgText,
+              type: 'image',
+              mediaUrl: imageUrl,
+              timestamp: Date.now(),
+              core: activeCore
+            }],
+            lastTimestamp: Date.now()
+          } : s
+        ));
         speakText(msgText);
       }
     } catch (error) {
@@ -245,6 +474,26 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleDeleteSession = (id: string) => {
+    setSessions(prev => prev.filter(s => s.id !== id));
+    if (activeSessionId === id) setActiveSessionId(null);
+  };
+
+  const handleToggleVoice = () => {
+    if (!voiceState.isActive) {
+      if (currentTTSNodeRef.current) {
+        try { currentTTSNodeRef.current.stop(); } catch (e) {}
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      vocalQueueRef.current = [];
+      isProcessingQueueRef.current = false;
+      setVoiceState(prev => ({ ...prev, isSpeaking: false }));
+    }
+    voiceRef.current?.toggle();
   };
 
   return (
@@ -293,47 +542,90 @@ const App: React.FC = () => {
       <Sidebar 
         isOpen={isSidebarOpen} 
         onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
-        onClear={() => setMessages([])}
+        onClear={handleClearChat}
         activeCore={activeCore}
-        onCoreSelect={setActiveCore}
+        onCoreSelect={(core) => {
+          if (core !== activeCore) {
+            addNotification('Neural Migration', `Transitioning to ${CORE_CONFIGS[core].name} protocols.`, 'info');
+          }
+          setActiveCore(core);
+          if (activeSessionId) {
+            setSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, core } : s));
+          }
+        }}
         speechRate={speechRate}
         onSpeechRateChange={setSpeechRate}
-        onOpenSecurity={() => setIsSecurityOpen(true)}
+        onOpenSecurity={() => {
+          setIsSecurityOpen(true);
+          addNotification('Security Alert', 'Accessing restricted Stark-Net defense protocols.', 'security');
+        }}
+        onToggleVoice={handleToggleVoice}
+        isVoiceActive={voiceState.isActive}
+        onShowHistory={() => setActiveSessionId(null)}
+        isSessionActive={!!activeSessionId}
       />
 
       <main className="flex-1 flex flex-col relative z-20 overflow-hidden">
-        <header className="h-16 border-b border-cyan-500/20 glass flex items-center justify-between px-4 md:px-6">
-          <div className="flex items-center gap-3 ml-12 lg:ml-0">
-            <div className={`w-7 h-7 md:w-8 md:h-8 rounded-full border-2 flex items-center justify-center ${voiceState.isSpeaking ? 'animate-pulse' : ''}`} style={{ borderColor: CORE_CONFIGS[activeCore].color }}>
-              <div className="w-3 h-3 md:w-4 md:h-4 rounded-full shadow-[0_0_10px_currentColor]" style={{ backgroundColor: CORE_CONFIGS[activeCore].color, color: CORE_CONFIGS[activeCore].color }}></div>
-            </div>
-            <div className="flex flex-col">
-               <h1 className="orbitron font-bold text-sm md:text-base tracking-widest glow-text text-cyan-400">F.R.I.D.A.Y.</h1>
-               <span className="text-[8px] md:text-[10px] orbitron font-bold tracking-tighter" style={{ color: CORE_CONFIGS[activeCore].color }}>
-                 CORE: {CORE_CONFIGS[activeCore].name}
-               </span>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 text-[10px] md:text-xs font-mono text-cyan-500/60 uppercase tracking-tighter">
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${voiceState.isActive ? 'bg-cyan-400 animate-ping' : 'bg-green-500'}`}></span>
-              <span className="hidden xs:inline">STARK_NET ACTIVE</span>
-            </div>
-          </div>
-        </header>
+        {activeSessionId ? (
+          <>
+            <header className="h-16 border-b border-cyan-500/20 glass flex items-center justify-between px-4 md:px-6">
+              <div className="flex items-center gap-3 ml-12 lg:ml-0">
+                <button 
+                  onClick={() => setActiveSessionId(null)}
+                  className="mr-2 w-8 h-8 rounded-lg hover:bg-white/5 flex items-center justify-center lg:hidden"
+                >
+                  <i className="fa-solid fa-chevron-left text-cyan-400"></i>
+                </button>
+                <div className={`w-7 h-7 md:w-8 md:h-8 rounded-full border-2 flex items-center justify-center ${voiceState.isSpeaking ? 'animate-pulse' : ''}`} style={{ borderColor: CORE_CONFIGS[activeCore].color }}>
+                  <div className="w-3 h-3 md:w-4 md:h-4 rounded-full shadow-[0_0_10px_currentColor]" style={{ backgroundColor: CORE_CONFIGS[activeCore].color, color: CORE_CONFIGS[activeCore].color }}></div>
+                </div>
+                <div className="flex flex-col">
+                   <h1 className="orbitron font-bold text-sm md:text-base tracking-widest glow-text text-cyan-400 truncate max-w-[150px] md:max-w-xs">{activeSession?.title}</h1>
+                   <span className="text-[8px] md:text-[10px] orbitron font-bold tracking-tighter" style={{ color: CORE_CONFIGS[activeCore].color }}>
+                     CORE: {CORE_CONFIGS[activeCore].name}
+                   </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-4 text-[8px] md:text-[10px] orbitron tracking-widest uppercase">
+                <div className="hidden sm:flex items-center gap-2 border-r border-cyan-500/20 pr-4">
+                  <span className={`w-1.5 h-1.5 rounded-full ${voiceState.isActive ? 'bg-cyan-400 shadow-[0_0_8px_#22d3ee] animate-pulse' : 'bg-slate-700'}`}></span>
+                  <span className={voiceState.isActive ? 'text-cyan-400' : 'text-slate-500'}>
+                    {voiceState.isActive ? 'Voice Link Active' : 'Voice Offline'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"></span>
+                  <span className="text-green-500/80">STARK_NET ACTIVE</span>
+                </div>
+              </div>
+            </header>
 
-        <ChatWindow 
-          messages={messages} 
-          isLoading={isLoading} 
-          onSendMessage={(text) => handleSendMessage(text, false)}
-          onGenerateImage={(prompt) => setPendingImagePrompt(prompt)}
-        />
+            <ChatWindow 
+              messages={messages} 
+              isLoading={isLoading} 
+              onSendMessage={(text, image) => handleSendMessage(text, image, false)}
+              onGenerateImage={(prompt) => setPendingImagePrompt(prompt)}
+              onToggleVoice={handleToggleVoice}
+              isVoiceActive={voiceState.isActive}
+            />
+          </>
+        ) : (
+          <SessionExplorer 
+            sessions={sessions}
+            onSelectSession={handleSelectSession}
+            onDeleteSession={handleDeleteSession}
+            onNewChat={handleNewSession}
+            activeCoreColor={CORE_CONFIGS[activeCore].color}
+          />
+        )}
 
         <VoiceInterface 
+          ref={voiceRef}
           state={voiceState}
           setState={setVoiceState}
           speechRate={speechRate}
           activeVoice={CORE_VOICES[activeCore]}
+          activeCoreInstruction={CORE_CONFIGS[activeCore].instruction}
           onTranscriptionUpdate={handleVoiceTranscriptionUpdate}
         />
 
@@ -341,6 +633,11 @@ const App: React.FC = () => {
           isOpen={isSecurityOpen}
           onClose={() => setIsSecurityOpen(false)}
           activeCoreColor={CORE_CONFIGS[activeCore].color}
+        />
+
+        <ToastContainer 
+          notifications={notifications}
+          onRemove={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
         />
       </main>
       <style>{`

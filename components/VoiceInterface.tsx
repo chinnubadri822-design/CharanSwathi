@@ -1,19 +1,24 @@
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { VoiceState, MessageRole } from '../types';
 import { FRIDAY_SYSTEM_INSTRUCTION, MODELS } from '../constants';
 import { encode, decode, decodeAudioData } from '../audioUtils';
+
+export interface VoiceInterfaceRef {
+  toggle: () => void;
+}
 
 interface VoiceInterfaceProps {
   state: VoiceState;
   setState: React.Dispatch<React.SetStateAction<VoiceState>>;
   speechRate: number;
   activeVoice: string;
+  activeCoreInstruction: string;
   onTranscriptionUpdate: (id: string, role: MessageRole, text: string) => void;
 }
 
-const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speechRate, activeVoice, onTranscriptionUpdate }) => {
+const VoiceInterface = forwardRef<VoiceInterfaceRef, VoiceInterfaceProps>(({ state, setState, speechRate, activeVoice, activeCoreInstruction, onTranscriptionUpdate }, ref) => {
   const [session, setSession] = useState<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const inputContextRef = useRef<AudioContext | null>(null);
@@ -75,7 +80,12 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
         });
       } catch (err: any) {
-        throw new Error("STARK_ERR: Hardware fault.");
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          throw new Error("STARK_ERR: Bio-link blocked. Please grant microphone permissions in your browser.");
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          throw new Error("STARK_ERR: Hardware missing. Verify your microphone connection.");
+        }
+        throw new Error("STARK_ERR: Hardware fault. System reset recommended.");
       }
 
       streamRef.current = stream;
@@ -86,6 +96,10 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
 
       if (inputCtx.state === 'suspended') await inputCtx.resume();
       if (outputCtx.state === 'suspended') await outputCtx.resume();
+
+      const validVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Hera', 'Zephyr', 'Orion'];
+      // Ensure 'Charon' is used if specified, otherwise strictly fallback to 'Kore'
+      const currentVoice = validVoices.includes(activeVoice) ? activeVoice : 'Kore';
 
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const sessionPromise = ai.live.connect({
@@ -99,23 +113,31 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
-              for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-              const pcmBlob = { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
-              sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
+              for (let i = 0; i < inputData.length; i++) int16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+              const base64Data = encode(new Uint8Array(int16.buffer));
+              sessionPromise.then(s => {
+                (s as any).sendRealtimeInput({
+                  audio: {
+                    data: base64Data,
+                    mimeType: 'audio/pcm;rate=16000'
+                  }
+                });
+              });
             };
             source.connect(scriptProcessor);
             scriptProcessor.connect(inputCtx.destination);
           },
-          onmessage: async (message: LiveServerMessage) => {
-            if (message.serverContent?.inputTranscription) {
+          onmessage: async (message: any) => {
+            if (message.realtimeInputTranscription?.text) {
               if (!currentInputId.current) currentInputId.current = 'voice-in-' + Date.now();
-              currentInputTranscription.current += message.serverContent.inputTranscription.text;
+              currentInputTranscription.current += message.realtimeInputTranscription.text;
               onTranscriptionUpdate(currentInputId.current, MessageRole.USER, currentInputTranscription.current);
             }
 
-            if (message.serverContent?.outputTranscription) {
+            // Official path for audio transcription output
+            if (message.serverContent?.modelDraft?.text) {
               if (!currentOutputId.current) currentOutputId.current = 'voice-out-' + Date.now();
-              currentOutputTranscription.current += message.serverContent.outputTranscription.text;
+              currentOutputTranscription.current += message.serverContent.modelDraft.text;
               onTranscriptionUpdate(currentOutputId.current, MessageRole.FRIDAY, currentOutputTranscription.current);
             }
 
@@ -124,24 +146,32 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
               currentOutputTranscription.current = '';
               currentInputId.current = '';
               currentOutputId.current = '';
+              setState(prev => ({ ...prev, isSpeaking: false }));
             }
 
-            const base64 = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+            // Official path for modelTurn audio data
+            const base64 = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64) {
               setState(prev => ({ ...prev, isSpeaking: true }));
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
-              const audioBuffer = await decodeAudioData(decode(base64), outputCtx, 24000, 1);
-              const source = outputCtx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(outputCtx.destination);
-              source.playbackRate.value = speechRateRef.current;
-              source.addEventListener('ended', () => {
-                sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setState(prev => ({ ...prev, isSpeaking: false }));
-              });
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += (audioBuffer.duration / speechRateRef.current);
-              sourcesRef.current.add(source);
+              try {
+                const audioBuffer = await decodeAudioData(decode(base64), outputCtx, 24000, 1);
+                if (!audioBuffer) throw new Error("Null buffer");
+                
+                const source = outputCtx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(outputCtx.destination);
+                source.playbackRate.value = speechRateRef.current;
+                source.addEventListener('ended', () => {
+                  sourcesRef.current.delete(source);
+                  if (sourcesRef.current.size === 0) setState(prev => ({ ...prev, isSpeaking: false }));
+                });
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += (audioBuffer.duration / speechRateRef.current);
+                sourcesRef.current.add(source);
+              } catch (decodeErr) {
+                console.error("Neural Audio Corruption:", decodeErr);
+              }
             }
 
             if (message.serverContent?.interrupted) {
@@ -155,13 +185,33 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
               currentOutputId.current = '';
             }
           },
-          onerror: (e) => setState(prev => ({ ...prev, error: "STARK_ERR: Uplink failed." })),
-          onclose: () => stopVoiceSession()
+          onerror: (e: any) => {
+            console.error("Neural Link Error:", e);
+            let errorMessage = "STARK_ERR: Uplink failed.";
+            
+            if (e?.message) {
+              if (e.message.includes('429')) errorMessage = "STARK_ERR: Neural quota exhausted.";
+              else if (e.message.includes('401') || e.message.includes('403')) errorMessage = "STARK_ERR: Authentication breach.";
+              else if (e.message.includes('network') || e.message.includes('fetch')) errorMessage = "STARK_ERR: Signal instability.";
+              else errorMessage = `STARK_ERR: ${e.message}`;
+            }
+            
+            setState(prev => ({ ...prev, error: errorMessage, isActive: false, isListening: false }));
+          },
+          onclose: (e: any) => {
+            if (e?.reason || e?.code) {
+              console.log("Neural Link Closed:", e);
+              if (e.code === 1006) {
+                 setState(prev => ({ ...prev, error: "STARK_ERR: Abnormal termination." }));
+              }
+            }
+            stopVoiceSession();
+          }
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: activeVoice } } },
-          systemInstruction: FRIDAY_SYSTEM_INSTRUCTION,
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: currentVoice } } },
+          systemInstruction: `${FRIDAY_SYSTEM_INSTRUCTION}\n\nACTIVE CORE PROTOCOL: ${activeCoreInstruction}\n\nIMPORTANT: You must speak with a charming and sophisticated Irish accent when speaking English and acting as the FRIDAY core. If acting as JARVIS, adopt a formal, gentlemanly British tone. Maintain the specific personality of the active core. If Boss speaks in another language, respond in that language with a sophisticated and intelligent tone suitable for F.R.I.D.A.Y.`,
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           tools: [{ googleSearch: {} }]
@@ -172,6 +222,16 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
       setState({ isActive: false, isListening: false, isSpeaking: false, error: err.message });
     }
   };
+
+  useImperativeHandle(ref, () => ({
+    toggle: () => {
+      if (state.isActive) {
+        stopVoiceSession();
+      } else {
+        startVoiceSession();
+      }
+    }
+  }));
 
   return (
     <div className="absolute bottom-20 md:bottom-28 right-4 md:right-8 z-50 flex flex-col items-center">
@@ -225,6 +285,6 @@ const VoiceInterface: React.FC<VoiceInterfaceProps> = ({ state, setState, speech
       </div>
     </div>
   );
-};
+});
 
 export default VoiceInterface;
